@@ -40,14 +40,24 @@ endif()
 
 add_subdirectory(${LLAMA_DIR} llama_build)
 
-# llama-server is a standalone executable, not a JNI library. Android will
-# only extract/execute files that live under jniLibs and follow the
-# lib*.so naming convention, so we rename+copy it there post-build.
-add_custom_command(TARGET llama-server POST_BUILD
+# add_custom_command(TARGET ... POST_BUILD) only works for targets created
+# in THIS file. llama-server is defined several add_subdirectory() levels
+# down inside llama.cpp/tools/server/, so that form fails with "TARGET was
+# not created in this directory" - a real CMake directory-scoping rule, not
+# a typo. The OUTPUT/DEPENDS form below is a plain build-graph dependency
+# and works across directory scopes.
+set(STAGED_SERVER "${CMAKE_CURRENT_SOURCE_DIR}/../jniLibs/${ANDROID_ABI}/libllama_server.so")
+
+add_custom_command(
+    OUTPUT "${STAGED_SERVER}"
     COMMAND ${CMAKE_COMMAND} -E make_directory
         "${CMAKE_CURRENT_SOURCE_DIR}/../jniLibs/${ANDROID_ABI}"
     COMMAND ${CMAKE_COMMAND} -E copy
         "$<TARGET_FILE:llama-server>"
-        "${CMAKE_CURRENT_SOURCE_DIR}/../jniLibs/${ANDROID_ABI}/libllama_server.so"
+        "${STAGED_SERVER}"
+    DEPENDS llama-server
     COMMENT "Staging llama-server as libllama_server.so for packaging"
+    VERBATIM
 )
+
+add_custom_target(stage_llama_server ALL DEPENDS "${STAGED_SERVER}")
