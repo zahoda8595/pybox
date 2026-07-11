@@ -16,7 +16,7 @@ import java.io.InputStreamReader
  * app/src/main/cpp/CMakeLists.txt) as a background process, bound to
  * 127.0.0.1:8081, loopback only. PyBox's Python/Flask backend
  * (backend_app.py) talks to it over that loopback socket — see the
- * /llm/* routes there.
+ * (loopback socket). See the /llm/status and /llm/generate routes there.
  *
  * This is a genuine headless background process: it keeps running whether
  * or not MainActivity is on screen. Android requires a visible notification
