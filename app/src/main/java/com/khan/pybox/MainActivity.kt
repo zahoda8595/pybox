@@ -28,6 +28,22 @@ import org.json.JSONArray
 import java.io.File
 import java.net.HttpURLConnection
 import java.net.URL
+import android.webkit.JavascriptInterface
+
+/**
+ * Exposes the backend's per-install auth token (written by auth.py to
+ * FILES_DIR/auth_token.txt) to page JS as window.PyBoxAuth.getToken(),
+ * so fetch() calls to the automation endpoints and other protected routes
+ * can attach it without you hand-managing it in every page. Read-only,
+ * confined to this app's own WebView.
+ */
+class PyBoxJsBridge(private val filesDir: File) {
+    @JavascriptInterface
+    fun getToken(): String {
+        val tokenFile = File(filesDir, "auth_token.txt")
+        return if (tokenFile.exists()) tokenFile.readText().trim() else ""
+    }
+}
 
 class MainActivity : AppCompatActivity() {
 
@@ -162,7 +178,9 @@ class MainActivity : AppCompatActivity() {
             try {
                 val py = Python.getInstance()
                 val backend = py.getModule("backend_app")
-                backend.callAttr("start_server", filesDir.absolutePath)
+                val pluginsDir = File(Environment.getExternalStorageDirectory(), "PyBox/plugins")
+                pluginsDir.mkdirs()
+                backend.callAttr("start_server", filesDir.absolutePath, pluginsDir.absolutePath)
                 // app.run() returns if the server is stopped/crashes - the
                 // watchdog notices this via failed pings, not here.
             } catch (e: Exception) {
@@ -179,6 +197,7 @@ class MainActivity : AppCompatActivity() {
             if (ready) {
                 backendIsUp = true
                 loadingOverlay.visibility = View.GONE
+                webView.addJavascriptInterface(PyBoxJsBridge(filesDir), "PyBoxAuth")
                 webView.loadUrl(serverUrl)
                 startWatchdog()
             } else if (startupAttempts < maxStartupAttempts) {
@@ -314,14 +333,15 @@ class MainActivity : AppCompatActivity() {
         val status = if (backendIsUp) "Backend: running" else "Backend: down"
         AlertDialog.Builder(this)
             .setTitle("PyBox controls — $status")
-            .setItems(arrayOf("Reload", "View Log", "View Error History", "Start LLM Engine", "Stop LLM Engine", "Reset App Data")) { _, which ->
+            .setItems(arrayOf("Reload", "Open Admin Panel", "View Log", "View Error History", "Start LLM Engine", "Stop LLM Engine", "Reset App Data")) { _, which ->
                 when (which) {
                     0 -> webView.loadUrl(serverUrl)
-                    1 -> showLog()
-                    2 -> showErrorHistory()
-                    3 -> startLlamaEngine()
-                    4 -> stopLlamaEngine()
-                    5 -> confirmReset()
+                    1 -> webView.loadUrl(serverUrl + "admin")
+                    2 -> showLog()
+                    3 -> showErrorHistory()
+                    4 -> startLlamaEngine()
+                    5 -> stopLlamaEngine()
+                    6 -> confirmReset()
                 }
             }
             .show()
