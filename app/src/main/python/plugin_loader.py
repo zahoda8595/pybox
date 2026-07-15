@@ -14,19 +14,34 @@ HOW TO WRITE A PLUGIN:
   Any .py file in the plugins folder that defines a top-level
   `register(ctx)` function gets it called on load/reload. `ctx` is a
   dict with:
-      ctx["app"]        - the Flask app, for ctx["app"].add_url_rule(...)
-      ctx["scheduler"]  - scheduler module, for JOB_HANDLERS[...] = fn
-      ctx["watcher"]    - watcher module, for EVENT_HANDLERS.append(fn)
-      ctx["config"]     - config.py module, for get()/set() persisted settings
-      ctx["require_auth"] - the @require_auth decorator, for protecting
-                             any routes your plugin adds
+      ctx["plugin_routes"] - dict, register HTTP routes here (see below)
+      ctx["scheduler"]     - scheduler module, for JOB_HANDLERS[...] = fn
+      ctx["watcher"]       - watcher module, for EVENT_HANDLERS.append(fn)
+      ctx["config"]        - config.py module, for get()/set() settings
+      ctx["require_auth"]  - the @require_auth decorator/function, call
+                              it yourself inside a route if you need to
+                              gate a plugin route the same way built-in
+                              /automation/* routes are gated
+      ctx["app"]           - the raw Flask app object. Present for
+                              advantage but with a hard limit: calling
+                              ctx["app"].route(...) or add_url_rule(...)
+                              ONLY works the very first time plugins load
+                              (at app startup, before any request has
+                              been served). Flask 3.x refuses that call
+                              on every later "Reload plugins" click with
+                              "setup method ... can no longer be called".
+                              Use ctx["plugin_routes"] instead - it works
+                              on every reload, not just the first.
 
-  Minimal example (save as /sdcard/PyBox/plugins/hello.py):
+  Route example (reload-safe - use this, not ctx["app"].route):
 
       def register(ctx):
-          @ctx["app"].route("/plugins/hello")
           def hello():
-              return {"message": "hello from a plugin, no rebuild needed"}
+              return {"message": "loaded without a rebuild"}
+          ctx["plugin_routes"]["hello"] = hello
+
+  That's reachable at /plugins/hello (any file at /plugins/<name> is
+  dispatched to whatever function is registered under that name).
 
   A plugin that adds a scheduled job:
 

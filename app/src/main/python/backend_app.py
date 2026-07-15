@@ -52,8 +52,11 @@ from flask import Flask, Response, jsonify, request
 import auth
 import config
 import error_manager
+import gdrive
+import osint_tools
 import plugin_loader
 import scheduler
+import scraper
 import watcher
 from auth import require_auth
 from error_manager import safe_route
@@ -251,6 +254,149 @@ def automation_token():
 
 
 # ---------------------------------------------------------------------
+# Plugin dispatch: Flask 3.x refuses app.route()/add_url_rule() calls
+# once the server has handled its first request ("setup method ... can
+# no longer be called"). That breaks hot-reloading plugins that try to
+# register routes directly - the FIRST load (at app startup, before any
+# request) works, but every later "Reload plugins" click would fail.
+#
+# Fix: register ONE real Flask route here, at startup, before app.run().
+# Plugins never touch app.route() themselves - they register a plain
+# function into PLUGIN_ROUTES by name, and this one route looks it up
+# and dispatches to it on every request. Reloading a plugin just swaps
+# the dict entry, which works at any time since it isn't a Flask
+# setup-method call at all.
+# ---------------------------------------------------------------------
+
+PLUGIN_ROUTES = {}
+
+
+@app.route("/plugins/<path:name>", methods=["GET", "POST", "PUT", "DELETE"])
+@safe_route("plugin-dispatch")
+def plugin_dispatch(name):
+    handler = PLUGIN_ROUTES.get(name)
+    if handler is None:
+        return jsonify({"error": f"no plugin route registered for '{name}'"}), 404
+    return handler()
+
+
+# ---------------------------------------------------------------------
+# Web scraping (scraper.py) - public pages only, see that file's docstring.
+# ---------------------------------------------------------------------
+
+@app.route("/scrape", methods=["POST"])
+@require_auth
+@safe_route("scrape")
+def scrape_route():
+    body = request.get_json(force=True)
+    url = body["url"]
+    want = body.get("want", ["text", "links", "metadata"])
+    return jsonify(scraper.scrape(url, want=want))
+
+
+# ---------------------------------------------------------------------
+# OSINT (osint_tools.py) - passive, public-records lookups only.
+# ---------------------------------------------------------------------
+
+@app.route("/osint/whois")
+@require_auth
+@safe_route("osint-whois")
+def osint_whois():
+    domain = request.args.get("domain")
+    return jsonify(osint_tools.whois_lookup(domain))
+
+
+@app.route("/osint/dns")
+@require_auth
+@safe_route("osint-dns")
+def osint_dns():
+    domain = request.args.get("domain")
+    return jsonify(osint_tools.dns_lookup(domain))
+
+
+@app.route("/osint/fingerprint")
+@require_auth
+@safe_route("osint-fingerprint")
+def osint_fingerprint():
+    url = request.args.get("url")
+    return jsonify(osint_tools.http_fingerprint(url))
+
+
+@app.route("/osint/subdomains")
+@require_auth
+@safe_route("osint-subdomains")
+def osint_subdomains():
+    domain = request.args.get("domain")
+    return jsonify(osint_tools.subdomain_search(domain))
+
+
+@app.route("/osint/file-metadata")
+@require_auth
+@safe_route("osint-file-metadata")
+def osint_file_metadata():
+    path = request.args.get("path")
+    return jsonify(osint_tools.file_metadata(path))
+
+
+# ---------------------------------------------------------------------
+# Google Drive (gdrive.py) - OAuth-authorized by you, see that file's
+# docstring for the one-time Google Cloud setup this needs.
+# /drive/authorize and /drive/oauth2callback are unprotected on purpose:
+# they're navigated to directly (not fetch()'d), so there's no reliable
+# way to attach the X-PyBox-Token header to them anyway - same reasoning
+# as /admin and /automation/token above.
+# ---------------------------------------------------------------------
+
+@app.route("/drive/authorize")
+@safe_route("drive-authorize")
+def drive_authorize():
+    if not gdrive.has_client_secrets():
+        return (
+            "client_secrets.json not found at PyBox/client_secrets.json. "
+            "See gdrive.py's docstring for the one-time Google Cloud setup "
+            "steps.", 400
+        )
+    from flask import redirect
+    return redirect(gdrive.build_authorize_url())
+
+
+@app.route("/drive/oauth2callback")
+@safe_route("drive-oauth2callback")
+def drive_oauth2callback():
+    gdrive.handle_callback(request.url)
+    return "Google Drive authorized. You can close this and return to PyBox."
+
+
+@app.route("/drive/status")
+@require_auth
+@safe_route("drive-status")
+def drive_status():
+    creds = gdrive.get_credentials()
+    return jsonify({
+        "client_secrets_configured": gdrive.has_client_secrets(),
+        "authorized": creds is not None,
+    })
+
+
+@app.route("/drive/files")
+@require_auth
+@safe_route("drive-files")
+def drive_files():
+    query = request.args.get("q")
+    return jsonify(gdrive.list_files(query=query))
+
+
+@app.route("/drive/download/<file_id>")
+@require_auth
+@safe_route("drive-download")
+def drive_download(file_id):
+    content, error = gdrive.download_file(file_id)
+    if error:
+        return jsonify({"error": error}), 400
+    return Response(content, mimetype="application/octet-stream")
+
+
+# ---------------------------------------------------------------------
 # Admin panel: settings, plugin management, logs, all in one page.
 # GET /admin itself is unprotected (it's just the shell page - same
 # reasoning as /automation/token above); every action button on the
@@ -313,45 +459,68 @@ _ADMIN_HTML = """<!DOCTYPE html>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>PyBox Admin</title>
 <style>
-  body { font-family: -apple-system, sans-serif; background:#111; color:#eee; margin:0; padding:16px; }
-  h1 { font-size:20px; } h2 { font-size:15px; color:#8bd; margin-top:24px; }
-  .card { background:#1c1c1c; border-radius:8px; padding:12px; margin-bottom:12px; }
-  table { width:100%; border-collapse:collapse; font-size:13px; }
-  td,th { text-align:left; padding:4px 6px; border-bottom:1px solid #333; }
-  button { background:#3a5; color:#fff; border:none; border-radius:4px; padding:6px 10px; margin:2px 0; font-size:13px; }
-  button.danger { background:#a33; }
-  input,select { background:#222; color:#eee; border:1px solid #444; border-radius:4px; padding:4px; margin:2px 0; }
-  pre { background:#000; color:#9d9; padding:8px; border-radius:6px; overflow-x:auto; font-size:11px; max-height:300px; overflow-y:auto; }
-  .status-ok { color:#6d6; } .status-error { color:#e66; }
+  * { box-sizing: border-box; }
+  body { font-family: -apple-system, sans-serif; background:#0d0d0d; color:#e8e8e8; margin:0; padding:14px; line-height:1.4; }
+  h1 { font-size:19px; margin:0 0 14px; }
+  .card { background:#1a1a1a; border:1px solid #2a2a2a; border-radius:10px; padding:14px; margin-bottom:14px; }
+  .card-header { display:flex; align-items:center; justify-content:space-between; margin-bottom:10px; }
+  .card-header h2 { font-size:14px; color:#7ec8f2; margin:0; font-weight:600; }
+  .count { background:#263238; color:#8bd; font-size:11px; padding:2px 8px; border-radius:10px; }
+  .hint { color:#888; font-size:12px; margin:0 0 10px; }
+  table { width:100%; border-collapse:collapse; font-size:12.5px; }
+  td,th { text-align:left; padding:6px 6px; border-bottom:1px solid #262626; }
+  th { color:#999; font-weight:500; font-size:11px; text-transform:uppercase; letter-spacing:.03em; }
+  tr:last-child td { border-bottom:none; }
+  .empty-row td { color:#666; font-style:italic; padding:10px 6px; }
+  button { background:#2e7d4f; color:#fff; border:none; border-radius:6px; padding:7px 12px; font-size:13px; cursor:pointer; }
+  button.danger { background:#8a3030; }
+  button.secondary { background:#333; }
+  input,select { background:#141414; color:#eee; border:1px solid #333; border-radius:6px; padding:5px 7px; font-size:12.5px; width:100%; }
+  .cfg-row { display:flex; align-items:center; gap:10px; padding:6px 0; border-bottom:1px solid #262626; }
+  .cfg-row label { flex:0 0 42%; color:#aaa; font-size:12.5px; word-break:break-word; }
+  .cfg-row input { flex:1; }
+  pre { background:#000; color:#8fbf8f; padding:10px; border-radius:8px; overflow-x:auto; font-size:11px; max-height:260px; overflow-y:auto; margin:6px 0 0; }
+  details { margin-top:4px; }
+  summary { cursor:pointer; color:#e88; font-size:12px; }
+  .status-ok { color:#6fcf6f; font-weight:600; }
+  .status-error { color:#e26666; font-weight:600; }
+  .actions { text-align:right; white-space:nowrap; }
+  .toolbar { display:flex; gap:8px; margin-bottom:10px; }
 </style>
 </head>
 <body>
 <h1>PyBox Admin</h1>
 
 <div class="card">
-  <h2>Config / Customization</h2>
+  <div class="card-header"><h2>Config / Customization</h2></div>
   <div id="config"></div>
 </div>
 
 <div class="card">
-  <h2>Scheduled Jobs</h2>
+  <div class="card-header"><h2>Scheduled Jobs</h2><span class="count" id="jobs-count">0</span></div>
+  <p class="hint">Jobs only run handlers registered in scheduler.JOB_HANDLERS - create new ones via a plugin.</p>
   <div id="jobs"></div>
 </div>
 
 <div class="card">
-  <h2>Folder Watchers</h2>
+  <div class="card-header"><h2>Folder Watchers</h2><span class="count" id="watchers-count">0</span></div>
+  <p class="hint">Only scans folders registered here - never the whole phone.</p>
   <div id="watchers"></div>
 </div>
 
 <div class="card">
-  <h2>Plugins (drop .py files at the PyBox/plugins folder on your SD card)</h2>
-  <button onclick="reloadPlugins()">Reload plugins</button>
+  <div class="card-header"><h2>Plugins</h2><span class="count" id="plugins-count">0</span></div>
+  <p class="hint">Drop .py files at PyBox/plugins on your SD card, then reload - no rebuild needed.</p>
+  <div class="toolbar"><button onclick="reloadPlugins()">Reload plugins</button></div>
   <div id="plugins"></div>
 </div>
 
 <div class="card">
-  <h2>Log (last 200 lines)</h2>
-  <button onclick="loadLogs()">Refresh</button>
+  <div class="card-header"><h2>Log</h2></div>
+  <div class="toolbar">
+    <button class="secondary" onclick="loadLogs(30)">Last 30</button>
+    <button class="secondary" onclick="loadLogs(200)">Last 200</button>
+  </div>
   <pre id="logs"></pre>
 </div>
 
@@ -371,11 +540,11 @@ async function loadStatus() {
 }
 
 function renderConfig(cfg) {
-  let html = "<table>";
+  let html = "";
   for (const [k, v] of Object.entries(cfg)) {
-    html += `<tr><td>${k}</td><td><input id="cfg_${k}" value='${JSON.stringify(v)}'></td></tr>`;
+    html += `<div class="cfg-row"><label>${k}</label><input id="cfg_${k}" value='${JSON.stringify(v)}'></div>`;
   }
-  html += "</table><button onclick=\\"saveConfig()\\">Save</button>";
+  html += '<div class="toolbar" style="margin-top:10px"><button onclick="saveConfig()">Save</button></div>';
   document.getElementById("config").innerHTML = html;
 }
 
@@ -391,11 +560,16 @@ async function saveConfig() {
 }
 
 function renderJobs(jobs) {
-  let html = "<table><tr><th>Name</th><th>Handler</th><th>Interval(s)</th><th>Last status</th><th></th></tr>";
+  document.getElementById("jobs-count").textContent = jobs.length;
+  if (!jobs.length) {
+    document.getElementById("jobs").innerHTML = '<table><tr class="empty-row"><td>No jobs yet.</td></tr></table>';
+    return;
+  }
+  let html = "<table><tr><th>Name</th><th>Handler</th><th>Every</th><th>Status</th><th></th></tr>";
   jobs.forEach(j => {
-    html += `<tr><td>${j.name}</td><td>${j.handler}</td><td>${j.interval_seconds}</td>` +
-            `<td class="status-${j.last_status||''}">${j.last_status||'never run'}</td>` +
-            `<td><button class="danger" onclick="deleteJob(${j.id})">Delete</button></td></tr>`;
+    html += `<tr><td>${j.name}</td><td>${j.handler}</td><td>${j.interval_seconds}s</td>` +
+            `<td class="status-${j.last_status||''}">${j.last_status||'pending'}</td>` +
+            `<td class="actions"><button class="danger" onclick="deleteJob(${j.id})">Delete</button></td></tr>`;
   });
   html += "</table>";
   document.getElementById("jobs").innerHTML = html;
@@ -407,10 +581,15 @@ async function deleteJob(id) {
 }
 
 function renderWatchers(watchers) {
-  let html = "<table><tr><th>Path</th><th>Extensions</th><th>Recursive</th><th></th></tr>";
+  document.getElementById("watchers-count").textContent = watchers.length;
+  if (!watchers.length) {
+    document.getElementById("watchers").innerHTML = '<table><tr class="empty-row"><td>No watchers yet.</td></tr></table>';
+    return;
+  }
+  let html = "<table><tr><th>Path</th><th>Ext</th><th>Recursive</th><th></th></tr>";
   watchers.forEach(w => {
-    html += `<tr><td>${w.path}</td><td>${w.extensions}</td><td>${w.recursive ? 'yes' : 'no'}</td>` +
-            `<td><button class="danger" onclick="deleteWatcher(${w.id})">Delete</button></td></tr>`;
+    html += `<tr><td style="word-break:break-all">${w.path}</td><td>${w.extensions||'any'}</td><td>${w.recursive ? 'yes' : 'no'}</td>` +
+            `<td class="actions"><button class="danger" onclick="deleteWatcher(${w.id})">Delete</button></td></tr>`;
   });
   html += "</table>";
   document.getElementById("watchers").innerHTML = html;
@@ -422,11 +601,19 @@ async function deleteWatcher(id) {
 }
 
 function renderPlugins(plugins) {
-  let html = "<table><tr><th>File</th><th>Status</th><th>Has register()</th></tr>";
+  const names = Object.keys(plugins);
+  document.getElementById("plugins-count").textContent = names.length;
+  if (!names.length) {
+    document.getElementById("plugins").innerHTML = '<table><tr class="empty-row"><td>No plugins loaded.</td></tr></table>';
+    return;
+  }
+  let html = "<table><tr><th>File</th><th>Status</th><th>register()</th></tr>";
   for (const [name, info] of Object.entries(plugins)) {
     html += `<tr><td>${name}</td><td class="status-${info.status}">${info.status}</td>` +
             `<td>${info.has_register ? 'yes' : 'no'}</td></tr>`;
-    if (info.detail) html += `<tr><td colspan="3"><pre>${info.detail}</pre></td></tr>`;
+    if (info.detail) {
+      html += `<tr><td colspan="3"><details><summary>show error</summary><pre>${info.detail}</pre></details></td></tr>`;
+    }
   }
   html += "</table>";
   document.getElementById("plugins").innerHTML = html;
@@ -437,14 +624,14 @@ async function reloadPlugins() {
   loadStatus();
 }
 
-async function loadLogs() {
-  const r = await fetch("/admin/logs?lines=200", { headers: authHeaders() });
+async function loadLogs(n) {
+  const r = await fetch(`/admin/logs?lines=${n}`, { headers: authHeaders() });
   const d = await r.json();
-  document.getElementById("logs").textContent = d.lines.join("");
+  document.getElementById("logs").textContent = d.lines.join("") || "(empty)";
 }
 
 loadStatus();
-loadLogs();
+loadLogs(30);
 setInterval(loadStatus, 10000);
 </script>
 </body>
@@ -458,12 +645,9 @@ setInterval(loadStatus, 10000);
 def start_server(files_dir, plugins_dir=None):
     global FILES_DIR
     FILES_DIR = files_dir
-    error_manager.init(files_dir)
-    auth.init(files_dir)
-    config.init(files_dir)
-    scheduler.init(files_dir)
-    watcher.init(files_dir)
 
+    # Logging goes first, unconditionally, so every failure below actually
+    # gets recorded somewhere instead of silently killing startup.
     logging.basicConfig(
         filename=os.path.join(files_dir, "pybox.log"),
         level=logging.INFO,
@@ -471,16 +655,47 @@ def start_server(files_dir, plugins_dir=None):
     )
     logging.info("PyBox backend starting. FILES_DIR=%s", files_dir)
 
-    # Plugins load LAST, after everything they might reference (app,
-    # scheduler, watcher, config, auth) already exists.
+    # Each subsystem init is wrapped separately on purpose: a failure in
+    # ANY one of these (e.g. plugin_loader losing SD-card access because
+    # "All files access" got reset on a reinstall) must not prevent Flask
+    # itself from starting. Losing the admin panel's plugin list is a
+    # much smaller problem than the entire server never binding to port
+    # 5000 and every page hanging forever, which is what happened before
+    # this was wrapped.
+    for name, fn in [
+        ("error_manager", lambda: error_manager.init(files_dir)),
+        ("auth", lambda: auth.init(files_dir)),
+        ("config", lambda: config.init(files_dir)),
+        ("scheduler", lambda: scheduler.init(files_dir)),
+        ("watcher", lambda: watcher.init(files_dir)),
+    ]:
+        try:
+            fn()
+        except Exception:
+            logging.error("Subsystem '%s' failed to init:\n%s", name, traceback.format_exc())
+
     if plugins_dir:
-        plugin_loader.init(plugins_dir, {
-            "app": app,
-            "scheduler": scheduler,
-            "watcher": watcher,
-            "config": config,
-            "require_auth": require_auth,
-        })
+        try:
+            plugin_loader.init(plugins_dir, {
+                "app": app,
+                "plugin_routes": PLUGIN_ROUTES,
+                "scheduler": scheduler,
+                "watcher": watcher,
+                "config": config,
+                "require_auth": require_auth,
+            })
+        except Exception:
+            logging.error("plugin_loader failed to init:\n%s", traceback.format_exc())
+
+        # client_secrets.json lives next to the plugins folder, i.e.
+        # PyBox/client_secrets.json alongside PyBox/plugins/ - see gdrive.py
+        # for the one-time Google Cloud setup this requires.
+        try:
+            pybox_root = os.path.dirname(plugins_dir.rstrip("/"))
+            client_secrets_path = os.path.join(pybox_root, "client_secrets.json")
+            gdrive.init(files_dir, client_secrets_path)
+        except Exception:
+            logging.error("gdrive failed to init:\n%s", traceback.format_exc())
 
     try:
         app.run(host="127.0.0.1", port=5000, debug=False, use_reloader=False)
