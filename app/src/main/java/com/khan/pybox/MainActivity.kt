@@ -29,6 +29,7 @@ import java.io.File
 import java.net.HttpURLConnection
 import java.net.URL
 import android.webkit.JavascriptInterface
+import android.widget.Toast
 
 /**
  * Exposes the backend's per-install auth token (written by auth.py to
