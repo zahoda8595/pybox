@@ -36,6 +36,8 @@ import threading
 import time
 import traceback
 
+import config
+
 _DB_PATH = None
 _LOCK = threading.Lock()
 _TICK_SECONDS = 5
@@ -146,6 +148,12 @@ def recent_runs(job_id, limit=10):
 
 
 def _run_due_jobs():
+    try:
+        if not config.get("automation_enabled", True):
+            return
+    except Exception:
+        pass  # config not initialized yet, or plugin removed it - fail open
+
     now = time.time()
     with _LOCK:
         conn = _conn()

@@ -111,6 +111,16 @@ class MainActivity : AppCompatActivity() {
 
         findViewById<Button>(R.id.view_log_button).setOnClickListener { showLog() }
         findViewById<Button>(R.id.settings_button).setOnClickListener { showSettingsMenu() }
+        findViewById<Button>(R.id.command_center_button).setOnClickListener {
+            webView.loadUrl(serverUrl + "admin")
+        }
+        findViewById<Button>(R.id.browser_button).setOnClickListener {
+            startActivity(Intent(this, BrowserActivity::class.java))
+        }
+
+        // Schedules the hourly background sync (backend ping + usage-stats
+        // report) that keeps running even when the app isn't open.
+        PyBoxWorker.schedule(this)
 
         startBackend()
         pollForStartup()
@@ -174,13 +184,21 @@ class MainActivity : AppCompatActivity() {
         if (!Python.isStarted()) {
             Python.start(AndroidPlatform(this))
         }
+        val keyHex = SecureKeyManager.getOrCreateKeyHex(this)
         Thread {
             try {
                 val py = Python.getInstance()
                 val backend = py.getModule("backend_app")
                 val pluginsDir = File(Environment.getExternalStorageDirectory(), "PyBox/plugins")
-                pluginsDir.mkdirs()
-                backend.callAttr("start_server", filesDir.absolutePath, pluginsDir.absolutePath)
+                try {
+                    pluginsDir.mkdirs()
+                } catch (e: Exception) {
+                    // Non-fatal: plugins are optional. Missing storage
+                    // permission here should not block the backend itself
+                    // from starting - see the matching try/except wrapping
+                    // in backend_app.py's start_server().
+                }
+                backend.callAttr("start_server", filesDir.absolutePath, pluginsDir.absolutePath, keyHex)
                 // app.run() returns if the server is stopped/crashes - the
                 // watchdog notices this via failed pings, not here.
             } catch (e: Exception) {
@@ -333,18 +351,77 @@ class MainActivity : AppCompatActivity() {
         val status = if (backendIsUp) "Backend: running" else "Backend: down"
         AlertDialog.Builder(this)
             .setTitle("PyBox controls — $status")
-            .setItems(arrayOf("Reload", "Open Admin Panel", "View Log", "View Error History", "Start LLM Engine", "Stop LLM Engine", "Reset App Data")) { _, which ->
+            .setItems(arrayOf("Reload", "Open Admin Panel", "Open Browser", "File Explorer", "View Log", "View Error History", "View Screen Time", "Encrypted Backup Now", "Start LLM Engine", "Stop LLM Engine", "Reset App Data")) { _, which ->
                 when (which) {
                     0 -> webView.loadUrl(serverUrl)
                     1 -> webView.loadUrl(serverUrl + "admin")
-                    2 -> showLog()
-                    3 -> showErrorHistory()
-                    4 -> startLlamaEngine()
-                    5 -> stopLlamaEngine()
-                    6 -> confirmReset()
+                    2 -> startActivity(Intent(this, BrowserActivity::class.java))
+                    3 -> startActivity(Intent(this, FileExplorerActivity::class.java))
+                    4 -> showLog()
+                    5 -> showErrorHistory()
+                    6 -> showScreenTime()
+                    7 -> runEncryptedBackup()
+                    8 -> startLlamaEngine()
+                    9 -> stopLlamaEngine()
+                    10 -> confirmReset()
                 }
             }
             .show()
+    }
+
+    /** Shows today's per-app foreground time (UsageStatsHelper) - or, if
+     * the special permission hasn't been granted yet, sends the user to
+     * the Settings screen that's the only sanctioned way to grant it. */
+    private fun showScreenTime() {
+        if (!UsageStatsHelper.hasPermission(this)) {
+            AlertDialog.Builder(this)
+                .setTitle("Screen time access needed")
+                .setMessage("Android requires granting this manually in Settings > Apps with usage access > PyBox. Open that screen now?")
+                .setPositiveButton("Open Settings") { _, _ -> UsageStatsHelper.requestPermission(this) }
+                .setNegativeButton("Cancel", null)
+                .show()
+            return
+        }
+        val usages = UsageStatsHelper.getUsageToday(this, days = 1)
+        val text = if (usages.isEmpty()) {
+            "No usage recorded yet today."
+        } else {
+            usages.take(15).joinToString("\n") { "${it.label}: ${UsageStatsHelper.formatDuration(it.totalTimeMs)}" }
+        }
+        AlertDialog.Builder(this)
+            .setTitle("Screen time — today")
+            .setMessage(text)
+            .setPositiveButton("Close", null)
+            .show()
+    }
+
+    /** Triggers an on-demand AES-GCM encrypted backup of contacts.db via
+     * the backend's /encryption/backup route. */
+    private fun runEncryptedBackup() {
+        Thread {
+            try {
+                val conn = URL(serverUrl.trimEnd('/') + "/encryption/backup").openConnection() as HttpURLConnection
+                conn.requestMethod = "POST"
+                conn.setRequestProperty("Content-Type", "application/json")
+                conn.setRequestProperty("X-PyBox-Token", authToken())
+                conn.doOutput = true
+                conn.outputStream.use { it.write("{\"db_name\":\"contacts.db\"}".toByteArray()) }
+                val ok = conn.responseCode in 200..299
+                conn.disconnect()
+                runOnUiThread {
+                    Toast.makeText(this, if (ok) "Encrypted backup created" else "Backup failed", android.widget.Toast.LENGTH_SHORT).show()
+                }
+            } catch (e: Exception) {
+                runOnUiThread {
+                    Toast.makeText(this, "Backup failed: ${e.message}", android.widget.Toast.LENGTH_LONG).show()
+                }
+            }
+        }.start()
+    }
+
+    private fun authToken(): String {
+        val tokenFile = File(filesDir, "auth_token.txt")
+        return if (tokenFile.exists()) tokenFile.readText().trim() else ""
     }
 
     /** Deletes locally stored files (DBs, logs, etc.) - asks for confirmation first. */

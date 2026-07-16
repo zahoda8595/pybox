@@ -34,9 +34,29 @@ android {
         }
     }
 
+    signingConfigs {
+        debug {
+            // Committed to the repo on purpose - this is a debug-only key,
+            // not a security-sensitive release key. Without a fixed key
+            // here, Gradle auto-generates a NEW random debug key on every
+            // fresh GitHub Actions runner, so each CI build ends up signed
+            // differently - and Android silently refuses to install an
+            // "update" signed with a different key than what's already on
+            // the phone. Pinning this keystore is what makes repeated
+            // `gh run download` + install actually behave like updates.
+            storeFile file('../debug.keystore')
+            storePassword 'android'
+            keyAlias 'androiddebugkey'
+            keyPassword 'android'
+        }
+    }
+
     buildTypes {
         release {
             minifyEnabled false
+        }
+        debug {
+            signingConfig signingConfigs.debug
         }
     }
 
@@ -55,6 +75,52 @@ chaquopy {
         version '3.11'
         pip {
             install 'flask'
+            // All pure-Python - deliberately avoiding anything with native/C
+            // extension dependencies (e.g. lxml, Pillow), since those are
+            // the most common cause of Chaquopy pip install failures on
+            // Android. If a future package needs one, expect a CI failure
+            // and treat it as a real blocker to investigate, not something
+            // to silently drop.
+            install 'requests'
+            install 'charset-normalizer==3.1.0'
+            install 'beautifulsoup4'
+            // search_engine.py (fast/deep multi-engine web search) needs no
+            // new packages - it's built entirely on requests + bs4 above,
+            // plus stdlib concurrent.futures/urllib. Deliberately NOT using
+            // Playwright: it requires bundling a full Chromium/WebKit
+            // binary and a Node driver process, which Chaquopy's pure-
+            // Python pip can't install and which wouldn't fit this app's
+            // arm64-only, no-cloud-dependency design anyway. JS-rendered
+            // pages are already handled by browser.py via the real
+            // Android WebView (which IS Chromium) in BrowserActivity.kt.
+            install 'dnspython'
+            install 'exifread'
+            install 'python-whois'
+            // AES-GCM encryption for exports/backups (encryption.py). Chaquopy
+            // maintains prebuilt Android wheels for pycryptodome specifically
+            // (unlike general `cryptography`), so this is a safe native-code
+            // exception to the pure-Python preference above.
+            install 'pycryptodome'
+            // Pinned deliberately: newer google-auth (>=2.30ish) added a
+            // hard dependency on `cryptography`, a compiled native
+            // library - by far the most likely thing here to break an
+            // Android cross-compile. These versions use the pure-Python
+            // `rsa` package for signing instead, verified by checking
+            // their actual dependency metadata before pinning.
+            install 'google-auth==2.29.0'
+            install 'google-auth-oauthlib==1.2.0'
+            install 'google-api-python-client==2.126.0'
+            // protobuf (pulled in transitively by google-api-python-client)
+            // has NO pure-Python wheel at any version - this is the one
+            // remaining real risk in this dependency set. Chaquopy
+            // maintains its own prebuilt-for-Android wheels for common
+            // native packages including protobuf, so this will likely
+            // still work - but if the CI build fails specifically while
+            // installing protobuf, that's expected and means Chaquopy's
+            // Android build for it isn't available for this Python/NDK
+            // combination; tell me and we'll swap the Drive integration
+            // to raw REST calls via `requests` instead, which sidesteps
+            // google-api-python-client (and protobuf) entirely.
         }
     }
 }
@@ -63,4 +129,15 @@ dependencies {
     implementation 'androidx.core:core-ktx:1.13.1'
     implementation 'androidx.appcompat:appcompat:1.7.0'
     implementation 'androidx.activity:activity-ktx:1.9.0'
+    // Background jobs that survive Doze/app-kill better than the in-process
+    // polling thread scheduler.py already runs - complements it rather than
+    // replacing it, since scheduler.py's jobs need the Python process alive
+    // anyway. Use WorkManager for "make sure the backend + jobs get a
+    // periodic nudge even if Android has frozen the process."
+    implementation 'androidx.work:work-runtime-ktx:2.9.1'
+    // Keystore-backed key storage (EncryptedFile / MasterKey) so the AES key
+    // encryption.py uses on the Python side is never written to disk in
+    // plaintext - only wrapped by the Android Keystore.
+    implementation 'androidx.security:security-crypto:1.1.0-alpha06'
+    implementation 'org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1'
 }

@@ -18,6 +18,9 @@ HOW TO WRITE A PLUGIN:
       ctx["scheduler"]     - scheduler module, for JOB_HANDLERS[...] = fn
       ctx["watcher"]       - watcher module, for EVENT_HANDLERS.append(fn)
       ctx["config"]        - config.py module, for get()/set() settings
+      ctx["files_dir"]     - app-private storage path, for a plugin's own
+                              SQLite DB or files (same folder auth.py,
+                              scheduler.py etc. use)
       ctx["require_auth"]  - the @require_auth decorator/function, call
                               it yourself inside a route if you need to
                               gate a plugin route the same way built-in

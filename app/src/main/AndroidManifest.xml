@@ -22,6 +22,13 @@
     <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE"
         android:maxSdkVersion="29" />
 
+    <!-- Declares intent to use UsageStatsManager (screen-time totals only -
+         see UsageStatsHelper.kt's docstring for exactly what this can and
+         cannot see). Like MANAGE_EXTERNAL_STORAGE, this is only grantable
+         by the user manually in Settings, never via a runtime dialog. -->
+    <uses-permission android:name="android.permission.PACKAGE_USAGE_STATS"
+        tools:ignore="ProtectedPermissions" />
+
     <application
         android:allowBackup="true"
         android:label="@string/app_name"
@@ -36,6 +43,41 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+
+        <!-- Receives "Share" from Chrome (or any app) - a URL shared here
+             opens directly in PyBox's own in-app browser, ready for you to
+             extract data from with one tap. This is the sanctioned
+             direction of Chrome integration: you explicitly send a page
+             TO PyBox. PyBox never reads Chrome's own browsing silently. -->
+        <activity
+            android:name=".BrowserActivity"
+            android:exported="true"
+            android:label="PyBox Browser">
+            <intent-filter>
+                <action android:name="android.intent.action.SEND" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="text/plain" />
+            </intent-filter>
+        </activity>
+
+        <!-- Local-only browser for this app's own storage: contacts.db,
+             usage_stats.db, encrypted backups, and anything imported into
+             the PyBox folder. Does not request access to other apps'
+             private storage. -->
+        <activity
+            android:name=".FileExplorerActivity"
+            android:exported="false"
+            android:label="File Explorer" />
+
+        <activity
+            android:name=".DbViewerActivity"
+            android:exported="false"
+            android:label="Database Viewer" />
+
+        <activity
+            android:name=".FileViewerActivity"
+            android:exported="false"
+            android:label="File Viewer" />
 
         <service
             android:name=".LlamaEngineService"
