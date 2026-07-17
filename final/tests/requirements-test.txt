@@ -1,0 +1,17 @@
+# Mirrors app/build.gradle's `pip { install ... }` block exactly, so a
+# green test run here means the same code will import cleanly on-device.
+# Keep these two lists in sync when either one changes.
+flask
+requests
+charset-normalizer==3.1.0
+beautifulsoup4
+dnspython
+exifread
+python-whois
+pycryptodome
+google-auth==2.29.0
+google-auth-oauthlib==1.2.0
+google-api-python-client==2.126.0
+
+pytest
+pytest-cov

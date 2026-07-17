@@ -1,0 +1,44 @@
+name: Backend tests
+
+# Runs the Flask/pytest suite in tests/ on every push and PR. This
+# catches backend regressions (like a broken route or a class
+# accidentally deleted mid-edit) BEFORE a Chaquopy build ships it to
+# the device - much cheaper to fail here than to find out after
+# installing the APK.
+#
+# If you already have a build workflow (e.g. .github/workflows/build.yml
+# that assembles the APK), add this job as a dependency so a build never
+# ships on top of a failing test run:
+#
+#   build:
+#     needs: test
+#     ...
+
+on:
+  push:
+    paths:
+      - "app/src/main/python/**"
+      - "tests/**"
+  pull_request:
+    paths:
+      - "app/src/main/python/**"
+      - "tests/**"
+  workflow_dispatch: {}
+
+jobs:
+  test:
+    name: pytest (backend_app.py)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install test dependencies
+        run: pip install -r tests/requirements-test.txt
+
+      - name: Run pytest
+        run: python -m pytest tests/ -v --tb=short

@@ -1,0 +1,19 @@
+/* app.css - shared across every PyBox page.
+
+   Used to be `* { box-sizing: border-box; }` copy-pasted at the top of
+   7 separate inline <style> blocks. Loaded once via theme.render() and
+   cached by the WebView across page navigations instead of being
+   re-parsed on every single nav.
+
+   Deliberately minimal for now: each page's per-element colors/radii
+   are already overridden at request time by theme.py's _style_block()
+   (reading live values from config.json), so unifying those further
+   here would just be dead weight until theme.py's override goes away.
+   Consolidating the truly page-specific layout rules (`.card`,
+   `button`, `input`) is a reasonable next pass, but riskier to do
+   blind without a real WebView to visually check each of the 7 pages
+   against - left as a follow-up rather than guessed at here. */
+
+* {
+  box-sizing: border-box;
+}
